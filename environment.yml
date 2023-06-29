@@ -1,3 +1,4 @@
+#don't use this use the rgrrg2 env that i made that currently works
 name: rgrg_env
 channels:
   - pytorch
