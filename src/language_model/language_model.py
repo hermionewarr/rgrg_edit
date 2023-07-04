@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from torchinfo import summary
 from transformers import GPT2LMHeadModel
-from transformers.generation_beam_search import BeamSearchScorer
+from transformers.generation.beam_search import BeamSearchScorer
 
 
 class Conv1DWithTrainedWeights(nn.Module):
@@ -105,7 +105,7 @@ class GPT2PseudoAttention(nn.Module):
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
 
-        # downcast (if necessary) back to V's dtype (if in mixed-precision) -- no-op otherwise
+        # downcast (if nec_replace_attention_by_pseudo_attentionessary) back to V's dtype (if in mixed-precision) -- no-op otherwise
         attn_weights = attn_weights.type(value_image_word.dtype)
         attn_weights = self.attn_dropout(attn_weights)
 
@@ -226,11 +226,14 @@ class LanguageModel(nn.Module):
         # convert each individual gpt2_block into a nn.ModuleList
         self.gpt2_blocks = nn.ModuleList(nn.ModuleList(gpt2_block.children()) for gpt2_block in self.gpt2_blocks)
 
+        self.avg_pool = nn.AvgPool2d(kernel_size=16)
+        self.dim_reduction = nn.Linear(2048, 1024)
         # small neural network to transform embeddings coming from the image feature space into embeddings in the text feature space
         self.feature_space_transformation_nn = nn.Sequential(
             nn.Linear(in_features=1024, out_features=1024),
+            #nn.Linear(in_features=2048, out_features=2048),
             nn.ReLU(),
-            nn.Linear(in_features=1024, out_features=1024)
+            nn.Linear(in_features=1024, out_features=1024),
         )
 
     def _replace_attention_by_pseudo_attention(self):
@@ -279,10 +282,14 @@ class LanguageModel(nn.Module):
         """
         # get a boolean copy of the attention_mask and invert it
         mask_to_ignore_padding_tokens_for_loss_computation = ~(attention_mask.to(torch.bool))
-
+        #print("image_hidden_state: ", image_hidden_states.shape)
+        pooled = self.avg_pool(image_hidden_states)
+        image_hidden_states = self.dim_reduction(torch.squeeze(pooled))
+        #print("image_hidden_state2: ", image_hidden_states.shape)
         # transform image_hidden_states from image feature space to text feature space
         image_hidden_states = self.feature_space_transformation_nn(image_hidden_states)  # shape [batch_size x word_hidden_dim], with word_hidden_dim = 1024
-
+        #print("image_hidden_state3: ", image_hidden_states.shape)
+        
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
         batch_size = input_ids.shape[0]

@@ -2,12 +2,11 @@ from typing import List, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from torchvision.models import resnet50, ResNet50_Weights
 
-from src.binary_classifier.binary_classifier_region_abnormal import BinaryClassifierRegionAbnormal
-from src.binary_classifier.binary_classifier_region_selection import BinaryClassifierRegionSelection
-from src.object_detector.object_detector import ObjectDetector
+import sys
+sys.path.append("/home/hermione/Documents/VLP/rgrg_edit/")
 from src.language_model.language_model import LanguageModel
-
 
 class ReportGenerationModel(nn.Module):
     """
@@ -16,9 +15,8 @@ class ReportGenerationModel(nn.Module):
         - language model decoder
     """
 
-    def __init__(self, pretrain_without_lm_model=False):
+    def __init__(self):
         super().__init__()
-        self.pretrain_without_lm_model = pretrain_without_lm_model
 
         resnet = resnet50(weights=ResNet50_Weights.DEFAULT)
 
@@ -27,7 +25,7 @@ class ReportGenerationModel(nn.Module):
 
         # use only the feature extractor of the pre-trained classification model
         # (i.e. use all children but the last 2, which are AdaptiveAvgPool2d and Linear)
-        self.backbone = nn.Sequential(*list(resnet.children())[:-2])
+        self.backbone = nn.Sequential(*list(resnet.children())[:-2])#[:-2]
 
         # FasterRCNN needs to know the number of output channels of the backbone
         # for ResNet-50, it's 2048 (with feature maps of size 16x16)
@@ -44,7 +42,7 @@ class ReportGenerationModel(nn.Module):
     def forward(
         self,
         images: torch.FloatTensor,  # images is of shape [batch_size x 1 x 512 x 512] (whole gray-scale images of size 512 x 512)
-        image_targets: List[Dict],  # contains a dict for every image with keys "boxes" and "labels"
+        #image_targets: List[Dict],  # contains a dict for every image with keys "boxes" and "labels"
         input_ids: torch.LongTensor,  # shape [(batch_size * 29) x seq_len], 1 sentence for every region for every image (sentence can be empty, i.e. "")
         attention_mask: torch.FloatTensor,  # shape [(batch_size * 29) x seq_len]
         return_loss: bool = True,
@@ -56,93 +54,30 @@ class ReportGenerationModel(nn.Module):
         Forward method is used for training and evaluation of model.
         Generate method is used for inference.
         """
-        if self.training:
-            # top_region_features of shape [batch_size x 29 x 1024] (i.e. 1 feature vector for every region for every image in batch)
-            # class_detected is a boolean tensor of shape [batch_size x 29]. Its value is True for a class if the object detector detected the class/region in the image
-            features = self.backbone(images)
 
-
-        else:
-            # during evaluation, also return detections (i.e. detected bboxes)
-            obj_detector_loss_dict, detections, top_region_features, class_detected = self.object_detector(images, image_targets)
-
-            del images
-            del image_targets
-
-            # during evaluation, for the binary classifier for region selection, get the loss, the regions that were selected by the classifier
-            # (and that were also detected) and the corresponding region features (selected_region_features)
-            # this is done to evaluate the decoder under "real-word" conditions, i.e. the binary classifier decides which regions get a sentence
-            classifier_loss_region_selection, selected_regions, selected_region_features = self.binary_classifier_region_selection(
-                top_region_features, class_detected, return_loss=True, region_has_sentence=region_has_sentence
-            )
-
-            # for the binary classifier for abnormal/normal detection, get the loss and the predicted abnormal regions
-            classifier_loss_region_abnormal, predicted_abnormal_regions = self.binary_classifier_region_abnormal(
-                top_region_features, class_detected, region_is_abnormal
-            )
-
-            if self.pretrain_without_lm_model:
-                return obj_detector_loss_dict, classifier_loss_region_selection, classifier_loss_region_abnormal, detections, class_detected, selected_regions, predicted_abnormal_regions
-
-            del top_region_features
-            del region_has_sentence
-            del region_is_abnormal
-
-            # use the selected_regions mask to filter the inputs_ids and attention_mask to those that correspond to regions that were selected
-            valid_input_ids, valid_attention_mask = self.get_valid_decoder_input_for_evaluation(selected_regions, input_ids, attention_mask)
-            valid_region_features = selected_region_features
-
-            del input_ids
-            del attention_mask
-
-        # valid_input_ids can be empty if during:
-        # training:
-        #   - the regions that have a gt sentence (specified by region_has_sentence) were all not detected (specified by class_detected).
-        #   This can happend if e.g. a lateral chest x-ray was erroneously included in the dataset (and hence the object detector not detecting
-        #   any regions, since it was trained on frontal chest x-rays)
-        # evaluation:
-        #   - no regions were selected by the binary classifier (specified by selected_regions)
-        #   - the regions that were selected by the binary classifier for region selection were all not detected (also specified by selected_regions,
-        #   since class_detected is encoded in selected_regions). Again, the reason might be a bad input image
-        #
-        # empty valid_input_ids (and thus empty valid_attention_mask, valid_region_features) will throw an exception in the language model,
-        # which is why we have to return early
-        if valid_input_ids.shape[0] == 0:
-            return -1
+        # top_region_features of shape [batch_size x 29 x 1024] (i.e. 1 feature vector for every region for every image in batch)
+        # class_detected is a boolean tensor of shape [batch_size x 29]. Its value is True for a class if the object detector detected the class/region in the image
+        features = self.backbone(images)
+        print("Features shape: ", features.shape)
+        del images
 
         language_model_loss = self.language_model(
-            valid_input_ids,
-            valid_attention_mask,
-            valid_region_features,
+            input_ids,
+            attention_mask,
+            features,
             return_loss,
             past_key_values,
             position_ids,
             use_cache,
         )
 
-        del valid_input_ids
-        del valid_attention_mask
-        del valid_region_features
+        del input_ids
+        del attention_mask
+        del features
 
         if self.training:
-            return obj_detector_loss_dict, classifier_loss_region_selection, classifier_loss_region_abnormal, language_model_loss
-        else:
-            # class_detected needed to evaluate how good the object detector is at detecting the different regions during evaluation
-            # detections and class_detected needed to compute IoU of object detector during evaluation
-            # selected_regions needed to evaluate binary classifier for region selection during evaluation and
-            # to map each generated sentence to its corresponding region (for example for plotting)
-            # predicted_abnormal_regions needed to evalute the binary classifier for normal/abnormal detection
-            return (
-                obj_detector_loss_dict,
-                classifier_loss_region_selection,
-                classifier_loss_region_abnormal,
-                language_model_loss,
-                detections,
-                class_detected,
-                selected_regions,
-                predicted_abnormal_regions
-            )
-
+            return language_model_loss
+    
     @torch.no_grad()
     def generate(
         self,
@@ -178,25 +113,10 @@ class ReportGenerationModel(nn.Module):
         features = self.backbone(images)
 
         del images
-
-        # selected_region_features is of shape [num_regions_selected_in_batch x 1024]
-        # selected_regions is of shape [batch_size x 29] and is True for regions that should get a sentence
-        # (it has exactly num_regions_selected_in_batch True values)
-        selected_regions, selected_region_features = self.binary_classifier_region_selection(
-            top_region_features, class_detected, return_loss=False
-        )
-
-        del top_region_features
-
-        # selected_region_features can be empty if no region was both detected by the object detector and selected
-        # by the binary classifier to get a sentence generated. This can happen especially early on in training
-        # Since this would throw an exception in the language model, we return early
-        if selected_region_features.shape[0] == 0:
-            return -1
-
+        
         # output_ids of shape (num_regions_selected_in_batch x longest_generated_sequence_length)
         output_ids = self.language_model.generate(
-            selected_region_features,
+            features,
             max_length,
             num_beams,
             num_beam_groups,
@@ -205,6 +125,4 @@ class ReportGenerationModel(nn.Module):
             early_stopping,
         )
 
-        del selected_region_features
-
-        return output_ids, selected_regions, detections, class_detected
+        return output_ids

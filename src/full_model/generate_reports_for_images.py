@@ -168,7 +168,7 @@ def get_model(checkpoint_path):
 
 
 def main():
-    checkpoint_path = ".../___.pt"
+    checkpoint_path = "/home/hermione/Documents/VLP/rgrg/full_model_checkpoint_val_loss_19.793_overall_steps_155252.pt"
     model = get_model(checkpoint_path)
 
     print("Model instantiated.")

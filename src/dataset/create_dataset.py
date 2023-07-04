@@ -43,12 +43,12 @@ import json
 import logging
 import os
 import re
-
-import imagesize
-import spacy
 import torch
 from tqdm import tqdm
-
+import imagesize
+import spacy
+import sys
+sys.path.append("/home/hermione/Documents/VLP/rgrg/")
 from src.dataset.constants import ANATOMICAL_REGIONS, IMAGE_IDS_TO_IGNORE, SUBSTRINGS_TO_REMOVE
 import src.dataset.section_parser as sp
 from src.path_datasets_and_weights import path_chest_imagenome, path_mimic_cxr, path_mimic_cxr_jpg, path_full_dataset

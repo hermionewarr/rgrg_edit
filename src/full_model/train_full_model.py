@@ -17,6 +17,8 @@ from torch.utils.data import DataLoader
 from transformers import GPT2Tokenizer
 from tqdm import tqdm
 
+import sys
+sys.path.append("/home/hermione/Documents/VLP/rgrg_edit/")
 from src.full_model.custom_collator import CustomCollator
 from src.full_model.custom_dataset import CustomDataset
 from src.full_model.evaluate_full_model.evaluate_model import evaluate_model
@@ -135,13 +137,8 @@ def train_model(
 
         train_losses_dict = {
             "total_loss": 0.0,
-            "obj_detector_loss": 0.0,
-            "region_selection_loss": 0.0,
-            "region_abnormal_loss": 0.0,
+            "language_model_loss": 0.0,
         }
-
-        if not PRETRAIN_WITHOUT_LM_MODEL:
-            train_losses_dict["language_model_loss"] = 0.0
 
         run_params["steps_taken"] = 0  # to know when to evaluate model during epoch and to normalize losses
 
@@ -158,20 +155,17 @@ def train_model(
             region_has_sentence = region_has_sentence.to(device, non_blocking=True)
             region_is_abnormal = region_is_abnormal.to(device, non_blocking=True)
 
-            if PRETRAIN_WITHOUT_LM_MODEL:
-                input_ids = None
-                attention_mask = None
-            else:
-                input_ids = batch["input_ids"]
-                attention_mask = batch["attention_mask"]
-
-                input_ids = input_ids.to(device, non_blocking=True)
-                attention_mask = attention_mask.to(device, non_blocking=True)
+            input_ids = batch["input_ids"]
+            attention_mask = batch["attention_mask"]
+            
+            input_ids = input_ids.to(device, non_blocking=True)
+            attention_mask = attention_mask.to(device, non_blocking=True)
 
             try:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    output = model(images, image_targets, input_ids, attention_mask, region_has_sentence, region_is_abnormal)
-
+                    #print("len: ", input_ids.size())
+                    output = model(images, input_ids, attention_mask)
+                    #print("Model output: ", output.shape)
                     # output == -1 if the region features that would have been passed into the language model were empty (see forward method for more details)
                     # this can happen if e.g. the object detector did not detect any regions in an image (e.g. there are a couple of lateral chest x-rays in ChestImaGenome,
                     # even though the dataset should only include frontal chest x-rays. These bad input images can trigger output == -1)
@@ -182,31 +176,12 @@ def train_model(
 
                         optimizer.zero_grad()
                         continue
+                    
+                    (
+                        language_model_loss,
+                    ) = output
 
-                    if PRETRAIN_WITHOUT_LM_MODEL:
-                        (
-                            obj_detector_loss_dict,
-                            classifier_loss_region_selection,
-                            classifier_loss_region_abnormal,
-                        ) = output
-                    else:
-                        (
-                            obj_detector_loss_dict,
-                            classifier_loss_region_selection,
-                            classifier_loss_region_abnormal,
-                            language_model_loss,
-                        ) = output
-
-                    # sum up all 4 losses from the object detector
-                    obj_detector_losses = sum(loss for loss in obj_detector_loss_dict.values())
-
-                    # sum up the rest of the losses
-                    total_loss = (
-                        WEIGHT_OBJECT_DETECTOR_LOSS * obj_detector_losses + WEIGHT_BINARY_CLASSIFIER_REGION_SELECTION_LOSS * classifier_loss_region_selection + WEIGHT_BINARY_CLASSIFIER_REGION_ABNORMAL_LOSS * classifier_loss_region_abnormal
-                    )
-
-                    if not PRETRAIN_WITHOUT_LM_MODEL:
-                        total_loss += WEIGHT_LANGUAGE_MODEL_LOSS * language_model_loss
+                    total_loss = language_model_loss
 
                 scaler.scale(total_loss).backward()
 
@@ -239,13 +214,8 @@ def train_model(
 
             list_of_losses = [
                 total_loss,
-                obj_detector_losses,
-                classifier_loss_region_selection,
-                classifier_loss_region_abnormal,
+                language_model_loss,
             ]
-
-            if not PRETRAIN_WITHOUT_LM_MODEL:
-                list_of_losses.append(language_model_loss)
 
             # dicts are insertion ordered since Python 3.7
             for loss_type, loss in zip(train_losses_dict, list_of_losses):
@@ -292,7 +262,7 @@ def get_model(checkpoint=None):
     # checkpoint["model"]["object_detector.rpn.head.conv.weight"] = checkpoint["model"].pop("object_detector.rpn.head.conv.0.0.weight")
     # checkpoint["model"]["object_detector.rpn.head.conv.bias"] = checkpoint["model"].pop("object_detector.rpn.head.conv.0.0.bias")
 
-    model = ReportGenerationModel(pretrain_without_lm_model=PRETRAIN_WITHOUT_LM_MODEL)
+    model = ReportGenerationModel()
     model.to(device, non_blocking=True)
 
     if checkpoint:
@@ -493,8 +463,9 @@ def create_run_folder():
     if os.path.exists(run_folder_path):
         log.error(f"Folder to save run {RUN} already exists at {run_folder_path}.")
         log.error("Delete the folder or change the run number.")
-        return None
 
+        return None
+    
     os.mkdir(run_folder_path)
     os.mkdir(checkpoints_folder_path)
     os.mkdir(tensorboard_folder_path)
@@ -565,7 +536,9 @@ def main():
     # resume_training = False
     checkpoint = None
     # checkpoint = torch.load(
-    #     "/u/home/tanida/runs/full_model/run_45/checkpoints/checkpoint_val_loss_106.395_overall_steps_56835.pt", map_location=device
+    #    "/home/hermione/Documents/VLP/rgrg/full_model_checkpoint_val_loss_19.793_overall_steps_155252.pt",
+    #   "/u/home/tanida/runs/full_model/run_45/checkpoints/checkpoint_val_loss_106.395_overall_steps_56835.pt", 
+    #   map_location=device
     # )
 
     model = get_model(checkpoint)
